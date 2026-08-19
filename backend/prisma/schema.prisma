@@ -15,6 +15,7 @@ model User {
   createdAt    DateTime  @default(now())
 
   projects     Project[]
+  incidents    Incident[]
 }
 
 model Project {
@@ -40,4 +41,26 @@ model Service {
   project     Project   @relation(fields: [projectId], references: [id])
 
   @@index([projectId])
+}
+
+model Incident {
+  id        String   @id @default(cuid())
+
+  title     String?
+  log       String
+
+  severity  String?
+  errorType String?
+  rootCause String?
+  solution  String?
+
+  status    String   @default("ANALYZED")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
