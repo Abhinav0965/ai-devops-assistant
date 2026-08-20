@@ -1,4 +1,5 @@
 import prisma from "../utils/prisma";
+import { analyzeIncident } from "./ai/incident-analyzer.service";
 
 interface CreateIncidentInput {
   userId: string;
@@ -11,11 +12,22 @@ export const createIncident = async ({
   title,
   log,
 }: CreateIncidentInput) => {
+  const analysis = await analyzeIncident(log);
+
   return prisma.incident.create({
     data: {
       userId,
       title,
       log,
+
+      severity: analysis.severity,
+      errorType: analysis.errorType,
+      rootCause: analysis.rootCause,
+      solution: analysis.recommendedSolution,
+
+      possibleCauses: analysis.possibleCauses,
+      prevention: analysis.prevention,
+
       status: "ANALYZED",
     },
   });
