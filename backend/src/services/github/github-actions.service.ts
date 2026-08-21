@@ -11,6 +11,10 @@ const octokit = new Octokit({
   auth: githubToken,
 });
 
+/* =========================================================
+   WORKFLOW RUNS
+   ========================================================= */
+
 type WorkflowRun =
   RestEndpointMethodTypes["actions"]["listWorkflowRunsForRepo"]["response"]["data"]["workflow_runs"][number];
 
@@ -23,7 +27,7 @@ export interface WorkflowRunInfo {
   commitSha: string;
   createdAt: string;
   updatedAt: string;
-  htmlUrl: string;
+  htmlUrl: string | null;
 }
 
 const mapWorkflowRun = (run: WorkflowRun): WorkflowRunInfo => {
@@ -36,7 +40,7 @@ const mapWorkflowRun = (run: WorkflowRun): WorkflowRunInfo => {
     commitSha: run.head_sha,
     createdAt: run.created_at,
     updatedAt: run.updated_at,
-    htmlUrl: run.html_url,
+    htmlUrl: run.html_url ?? null,
   };
 };
 
@@ -69,9 +73,77 @@ export const getFailedWorkflowRuns = async (
   const runs = await getWorkflowRuns(owner, repo);
 
   return runs.filter(
-    (run) =>
+    (run: WorkflowRunInfo) =>
       run.conclusion === "failure" ||
       run.conclusion === "timed_out" ||
       run.conclusion === "cancelled"
+  );
+};
+
+/* =========================================================
+   WORKFLOW JOBS
+   ========================================================= */
+
+type WorkflowJob =
+  RestEndpointMethodTypes["actions"]["listJobsForWorkflowRun"]["response"]["data"]["jobs"][number];
+
+export interface WorkflowJobInfo {
+  id: number;
+  name: string;
+  status: string | null;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  htmlUrl: string | null;
+}
+
+const mapWorkflowJob = (job: WorkflowJob): WorkflowJobInfo => {
+  return {
+    id: job.id,
+    name: job.name,
+    status: job.status ?? null,
+    conclusion: job.conclusion ?? null,
+    startedAt: job.started_at ?? null,
+    completedAt: job.completed_at ?? null,
+    htmlUrl: job.html_url ?? null,
+  };
+};
+
+export const getWorkflowJobs = async (
+  owner: string,
+  repo: string,
+  runId: number
+): Promise<WorkflowJobInfo[]> => {
+  try {
+    const response =
+      await octokit.rest.actions.listJobsForWorkflowRun({
+        owner,
+        repo,
+        run_id: runId,
+        per_page: 100,
+      });
+
+    return response.data.jobs.map(mapWorkflowJob);
+  } catch (error) {
+    console.error("GitHub workflow jobs error:", error);
+
+    throw new Error(
+      "Failed to fetch GitHub workflow jobs"
+    );
+  }
+};
+
+export const getFailedWorkflowJobs = async (
+  owner: string,
+  repo: string,
+  runId: number
+): Promise<WorkflowJobInfo[]> => {
+  const jobs = await getWorkflowJobs(owner, repo, runId);
+
+  return jobs.filter(
+    (job: WorkflowJobInfo) =>
+      job.conclusion === "failure" ||
+      job.conclusion === "timed_out" ||
+      job.conclusion === "cancelled"
   );
 };
