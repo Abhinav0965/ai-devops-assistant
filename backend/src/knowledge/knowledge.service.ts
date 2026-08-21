@@ -3,6 +3,11 @@ import { postgresqlKnowledge } from "./documents/postgresql";
 import { nodejsKnowledge } from "./documents/nodejs";
 import { dockerKnowledge } from "./documents/docker";
 
+import {
+  generateEmbedding,
+  cosineSimilarity,
+} from "./embedding.service";
+
 export interface KnowledgeDocument {
   title: string;
   category: string;
@@ -11,7 +16,9 @@ export interface KnowledgeDocument {
 
 interface ScoredDocument {
   document: KnowledgeDocument;
-  score: number;
+  keywordScore: number;
+  semanticScore: number;
+  finalScore: number;
 }
 
 const knowledgeBase: KnowledgeDocument[] = [
@@ -26,8 +33,8 @@ export const getKnowledgeBase = (): KnowledgeDocument[] => {
 };
 
 /*
- * Common words that do not provide much useful information
- * when searching DevOps knowledge.
+ * Common words that don't provide much useful
+ * information during keyword retrieval.
  */
 const stopWords = new Set([
   "the",
@@ -65,7 +72,7 @@ const stopWords = new Set([
 ]);
 
 /*
- * Convert a query into meaningful keywords.
+ * Convert text into meaningful keywords.
  */
 const tokenize = (text: string): string[] => {
   return text
@@ -80,11 +87,9 @@ const tokenize = (text: string): string[] => {
 };
 
 /*
- * Calculate how relevant a document is to the query.
- *
- * Higher score = more relevant document.
+ * Calculate traditional keyword relevance.
  */
-const calculateRelevanceScore = (
+const calculateKeywordScore = (
   query: string,
   document: KnowledgeDocument
 ): number => {
@@ -105,14 +110,14 @@ const calculateRelevanceScore = (
     }
 
     /*
-     * Category matches are also important.
+     * Category matches.
      */
     if (categoryWords.includes(word)) {
       score += 3;
     }
 
     /*
-     * Content matches provide supporting evidence.
+     * Content matches.
      */
     if (contentWords.includes(word)) {
       score += 1;
@@ -122,39 +127,133 @@ const calculateRelevanceScore = (
   return score;
 };
 
-export const searchKnowledge = (
+/*
+ * Cache embeddings because our knowledge documents
+ * do not change frequently.
+ *
+ * This prevents generating the same document embedding
+ * on every incident request.
+ */
+const embeddingCache =
+  new Map<string, number[]>();
+
+/*
+ * Generate or retrieve a cached embedding
+ * for a knowledge document.
+ */
+const getDocumentEmbedding = async (
+  document: KnowledgeDocument
+): Promise<number[]> => {
+  const cacheKey =
+    `${document.title}:${document.category}`;
+
+  const cachedEmbedding =
+    embeddingCache.get(cacheKey);
+
+  if (cachedEmbedding) {
+    return cachedEmbedding;
+  }
+
+  const documentText = `
+Title: ${document.title}
+
+Category: ${document.category}
+
+${document.content}
+`;
+
+  const embedding =
+    await generateEmbedding(documentText);
+
+  embeddingCache.set(cacheKey, embedding);
+
+  return embedding;
+};
+
+/*
+ * Hybrid knowledge retrieval.
+ *
+ * Combines:
+ *
+ *   40% keyword relevance
+ *   60% semantic similarity
+ */
+export const searchKnowledge = async (
   query: string
-): KnowledgeDocument[] => {
-  const scoredDocuments: ScoredDocument[] =
-    knowledgeBase.map((document) => ({
-      document,
-      score: calculateRelevanceScore(
+): Promise<KnowledgeDocument[]> => {
+  /*
+   * Generate embedding for the incident query.
+   */
+  const queryEmbedding =
+    await generateEmbedding(query);
+
+  const scoredDocuments: ScoredDocument[] = [];
+
+  for (const document of knowledgeBase) {
+    /*
+     * Traditional keyword score.
+     */
+    const keywordScore =
+      calculateKeywordScore(
         query,
         document
-      ),
-    }));
+      );
 
-  /*
-   * Remove documents that have no relevant matches.
-   */
-  const relevantDocuments = scoredDocuments.filter(
-    (item) => item.score > 0
-  );
+    /*
+     * Semantic similarity.
+     */
+    const documentEmbedding =
+      await getDocumentEmbedding(document);
+
+    const semanticScore =
+      cosineSimilarity(
+        queryEmbedding,
+        documentEmbedding
+      );
+
+    /*
+     * Normalize keyword score approximately
+     * into the 0-1 range.
+     *
+     * We cap it because keyword scores can grow
+     * depending on query length.
+     */
+    const normalizedKeywordScore =
+      Math.min(keywordScore / 20, 1);
+
+    /*
+     * Hybrid score.
+     *
+     * Semantic similarity receives slightly more
+     * weight because semantic relationships are the
+     * main reason we're introducing embeddings.
+     */
+    const finalScore =
+      normalizedKeywordScore * 0.4 +
+      semanticScore * 0.6;
+
+    scoredDocuments.push({
+      document,
+      keywordScore,
+      semanticScore,
+      finalScore,
+    });
+  }
 
   /*
    * Highest relevance first.
    */
-  relevantDocuments.sort(
-    (a, b) => b.score - a.score
+  scoredDocuments.sort(
+    (a, b) =>
+      b.finalScore - a.finalScore
   );
 
   /*
-   * Return only the top 3 documents.
-   *
-   * This prevents unnecessary knowledge from being
-   * sent to Gemini as the knowledge base grows.
+   * Return the top 3 documents.
    */
-  return relevantDocuments
+  return scoredDocuments
     .slice(0, 3)
-    .map((item) => item.document);
+    .map(
+      (item) => item.document
+    );
 };

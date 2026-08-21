@@ -14,6 +14,18 @@ export const createIncident = async ({
 }: CreateIncidentInput) => {
   const analysis = await analyzeIncident(log);
 
+  console.log("Saving AI analysis to database:");
+  console.log({
+    severity: analysis.severity,
+    errorType: analysis.errorType,
+    summary: analysis.summary,
+    rootCause: analysis.rootCause,
+    solution: analysis.solution,
+    possibleCauses: analysis.possibleCauses,
+    prevention: analysis.prevention,
+    confidence: analysis.confidence,
+  });
+
   return prisma.incident.create({
     data: {
       userId,
@@ -21,12 +33,14 @@ export const createIncident = async ({
       log,
 
       severity: analysis.severity,
-      confidence: analysis.confidence,
       errorType: analysis.errorType,
+      summary: analysis.summary,
       rootCause: analysis.rootCause,
-      solution: analysis.recommendedSolution,
-      possibleCauses: analysis.possibleCauses,
+      solution: analysis.solution,
+
+      possibleCauses: JSON.stringify(analysis.possibleCauses),
       prevention: analysis.prevention,
+      confidence: analysis.confidence,
 
       status: "ANALYZED",
     },

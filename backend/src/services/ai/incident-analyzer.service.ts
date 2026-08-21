@@ -2,328 +2,370 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { searchKnowledge } from "../../knowledge/knowledge.service";
 
 export interface IncidentAnalysis {
-  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-  confidence: number;
+  severity: string;
   errorType: string;
   summary: string;
   rootCause: string;
   possibleCauses: string[];
-  recommendedSolution: string;
+  solution: string;
   prevention: string;
+  confidence: number;
 }
 
-const validateIncidentAnalysis = (
-  data: unknown
+const apiKey = process.env.GEMINI_API_KEY;
+
+if (!apiKey) {
+  throw new Error("GEMINI_API_KEY is not configured");
+}
+
+const genAI = new GoogleGenerativeAI(apiKey);
+
+const model = genAI.getGenerativeModel({
+  model: "gemini-3.6-flash",
+});
+
+/**
+ * Remove markdown code fences if Gemini returns JSON
+ * wrapped inside ```json ... ```
+ */
+const cleanJsonResponse = (text: string): string => {
+  return text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+};
+
+/**
+ * Validate and normalize Gemini's response.
+ */
+const normalizeAnalysis = (
+  data: Partial<IncidentAnalysis>
 ): IncidentAnalysis => {
-  if (!data || typeof data !== "object") {
-    throw new Error("AI response is not an object");
-  }
+  const severity = String(
+    data.severity || "MEDIUM"
+  ).toUpperCase();
 
-  const analysis = data as Record<string, unknown>;
-
-  const validSeverities = [
+  const allowedSeverities = [
     "LOW",
     "MEDIUM",
     "HIGH",
     "CRITICAL",
   ];
 
-  if (
-    typeof analysis.severity !== "string" ||
-    !validSeverities.includes(analysis.severity)
-  ) {
-    throw new Error("AI returned an invalid severity");
+  const normalizedSeverity = allowedSeverities.includes(
+    severity
+  )
+    ? severity
+    : "MEDIUM";
+
+  const possibleCauses = Array.isArray(
+    data.possibleCauses
+  )
+    ? data.possibleCauses.map((cause) =>
+        String(cause)
+      )
+    : [];
+
+  let confidence = Number(
+    data.confidence ?? 0.5
+  );
+
+  if (Number.isNaN(confidence)) {
+    confidence = 0.5;
   }
 
-  if (
-    typeof analysis.confidence !== "number" ||
-    analysis.confidence < 0 ||
-    analysis.confidence > 1
-  ) {
-    throw new Error("AI returned invalid confidence");
-  }
-
-  if (
-    typeof analysis.errorType !== "string" ||
-    analysis.errorType.trim() === ""
-  ) {
-    throw new Error("AI returned invalid error type");
-  }
-
-  if (
-    typeof analysis.summary !== "string" ||
-    analysis.summary.trim() === ""
-  ) {
-    throw new Error("AI returned invalid summary");
-  }
-
-  if (
-    typeof analysis.rootCause !== "string" ||
-    analysis.rootCause.trim() === ""
-  ) {
-    throw new Error("AI returned invalid root cause");
-  }
-
-  if (
-    !Array.isArray(analysis.possibleCauses) ||
-    !analysis.possibleCauses.every(
-      (cause) => typeof cause === "string"
-    )
-  ) {
-    throw new Error("AI returned invalid possible causes");
-  }
-
-  if (
-    typeof analysis.recommendedSolution !== "string" ||
-    analysis.recommendedSolution.trim() === ""
-  ) {
-    throw new Error("AI returned invalid recommended solution");
-  }
-
-  if (
-    typeof analysis.prevention !== "string" ||
-    analysis.prevention.trim() === ""
-  ) {
-    throw new Error("AI returned invalid prevention");
-  }
+  confidence = Math.max(
+    0,
+    Math.min(1, confidence)
+  );
 
   return {
-    severity: analysis.severity as IncidentAnalysis["severity"],
-    confidence: analysis.confidence,
-    errorType: analysis.errorType,
-    summary: analysis.summary,
-    rootCause: analysis.rootCause,
-    possibleCauses: analysis.possibleCauses as string[],
-    recommendedSolution: analysis.recommendedSolution,
-    prevention: analysis.prevention,
+    severity: normalizedSeverity,
+
+    errorType: String(
+      data.errorType ||
+        "Unknown Error"
+    ),
+
+    summary: String(
+      data.summary ||
+        "The incident could not be fully summarized from the available log information."
+    ),
+
+    rootCause: String(
+      data.rootCause ||
+        "The root cause could not be determined with the available information."
+    ),
+
+    possibleCauses,
+
+    solution: String(
+      data.solution ||
+        "Inspect application logs, metrics, dependencies, and configuration to identify the underlying failure."
+    ),
+
+    prevention: String(
+      data.prevention ||
+        "Improve monitoring, logging, health checks, and automated alerting for this type of failure."
+    ),
+
+    confidence,
   };
 };
 
-const extractJson = (text: string): string => {
-  let cleaned = text.trim();
-
-  // Remove Markdown code fences if Gemini returns them.
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "");
-    cleaned = cleaned.replace(/\s*```$/, "");
-  }
-
-  return cleaned.trim();
-};
-
+/**
+ * Analyze a DevOps incident using:
+ *
+ * 1. Hybrid knowledge retrieval
+ * 2. Gemini
+ * 3. Structured JSON output
+ */
 export const analyzeIncident = async (
   log: string
 ): Promise<IncidentAnalysis> => {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not configured");
+    if (
+      !log ||
+      typeof log !== "string" ||
+      log.trim().length === 0
+    ) {
+      throw new Error(
+        "Incident log is required"
+      );
     }
 
     /*
-     * STEP 1:
-     * Retrieve relevant DevOps knowledge.
+     * --------------------------------------------------
+     * STEP 1: Retrieve relevant knowledge
+     * --------------------------------------------------
+     *
+     * searchKnowledge() is asynchronous because it
+     * generates embeddings.
+     *
+     * IMPORTANT:
+     * We must use await here.
      */
-    const relevantKnowledge = searchKnowledge(log);
+    const relevantKnowledge =
+      await searchKnowledge(log);
 
     /*
-     * STEP 2:
-     * Convert retrieved documents into context for Gemini.
+     * --------------------------------------------------
+     * STEP 2: Convert retrieved knowledge into context
+     * --------------------------------------------------
      */
     const knowledgeContext =
       relevantKnowledge.length > 0
         ? relevantKnowledge
             .map(
-              (document) => `
-### ${document.title}
+              (document, index) => `
+KNOWLEDGE DOCUMENT ${index + 1}
 
-Category: ${document.category}
+Title:
+${document.title}
 
+Category:
+${document.category}
+
+Content:
 ${document.content}
 `
             )
-            .join("\n\n")
-        : "No relevant DevOps knowledge was found.";
+            .join("\n-----------------------------\n")
+        : "No relevant knowledge documents were found.";
 
     /*
-     * STEP 3:
-     * Initialize Gemini.
-     */
-    const genAI = new GoogleGenerativeAI(apiKey);
-
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-    });
-
-    /*
-     * STEP 4:
-     * Build the RAG-enhanced prompt.
+     * --------------------------------------------------
+     * STEP 3: Build the AI prompt
+     * --------------------------------------------------
      */
     const prompt = `
-You are an AI DevOps incident analysis assistant.
+You are an expert AI DevOps incident analysis assistant.
 
-Your job is to analyze a DevOps incident log and provide
-a structured diagnosis.
+Your job is to analyze the provided DevOps log and produce
+a technically accurate incident diagnosis.
 
-You have access to a DevOps knowledge base retrieved
-specifically for this incident.
+You have access to a small internal DevOps knowledge base.
+Use it as supporting technical context.
 
-IMPORTANT:
-- Use the provided DevOps knowledge as supporting evidence.
-- Do not blindly assume that every statement in the knowledge
-  base applies to this incident.
-- Do not invent facts that are not supported by the incident
-  log or the provided knowledge.
-- Clearly distinguish confirmed causes from possible causes.
-- If the evidence is insufficient to determine the exact root
-  cause, explicitly state that the root cause is uncertain.
-- Reduce confidence when the evidence is weak or ambiguous.
+IMPORTANT RULES:
 
-DEVOPS KNOWLEDGE:
+1. Analyze the actual log carefully.
+2. Use the retrieved knowledge when it is relevant.
+3. Do not blindly copy the knowledge base.
+4. Do not invent facts that are not supported by the log
+   or reasonable DevOps knowledge.
+5. If the log does not contain enough information to
+   determine the exact root cause, explicitly say that
+   the exact root cause is uncertain.
+6. Distinguish between confirmed facts and possible causes.
+7. Give practical remediation steps.
+8. Consider Docker/container networking when the log
+   indicates that services are running in containers.
+9. Confidence must be between 0 and 1.
+10. Return ONLY valid JSON.
 
-${knowledgeContext}
-
---------------------------------------------------
-
-INCIDENT LOG:
-
-${log}
-
---------------------------------------------------
-
-Return ONLY valid JSON.
-
-The response MUST follow exactly this structure:
+REQUIRED JSON STRUCTURE:
 
 {
   "severity": "LOW | MEDIUM | HIGH | CRITICAL",
-  "confidence": 0.0,
   "errorType": "string",
   "summary": "string",
   "rootCause": "string",
-  "possibleCauses": ["string"],
-  "recommendedSolution": "string",
-  "prevention": "string"
+  "possibleCauses": [
+    "string",
+    "string"
+  ],
+  "solution": "string",
+  "prevention": "string",
+  "confidence": 0.0
 }
 
-Rules:
+SEVERITY GUIDELINES:
 
-1. severity must be exactly one of:
-   LOW, MEDIUM, HIGH, CRITICAL.
+LOW:
+Minor issue with little or no user impact.
 
-2. confidence must be a number between 0.0 and 1.0.
+MEDIUM:
+Service degradation, timeout, or recoverable issue.
 
-3. Confidence represents how strongly the provided evidence
-   supports the identified root cause.
+HIGH:
+Important service failure, database failure,
+deployment failure, or significant user impact.
 
-4. Use high confidence only when the incident log provides
-   strong evidence.
+CRITICAL:
+Major production outage, data loss, security incident,
+or widespread system failure.
 
-5. If the incident is ambiguous, use a lower confidence score.
+--------------------------------
+RETRIEVED KNOWLEDGE
+--------------------------------
 
-6. Do not increase confidence simply because a particular
-   cause is common in DevOps incidents.
+${knowledgeContext}
 
-7. possibleCauses must be an array of strings.
+--------------------------------
+INCIDENT LOG
+--------------------------------
 
-8. The rootCause must explain the most likely cause based
-   on the available evidence.
+${log}
 
-9. If the exact root cause cannot be determined, explicitly
-   say that the root cause is uncertain.
+--------------------------------
+ANALYSIS
+--------------------------------
 
-10. recommendedSolution must contain practical troubleshooting
-    or remediation steps.
-
-11. prevention must contain practical steps to reduce the
-    likelihood of the incident happening again.
-
-12. Return JSON only. Do not include Markdown, explanations,
-    or code fences outside the JSON object.
+Return only the JSON object.
 `;
 
     /*
-     * STEP 5:
-     * Ask Gemini for the analysis.
+     * --------------------------------------------------
+     * STEP 4: Call Gemini
+     * --------------------------------------------------
      */
-    let result;
-let lastError: unknown;
+    const result =
+      await model.generateContent({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
 
-for (let attempt = 1; attempt <= 3; attempt++) {
-  try {
-    result = await model.generateContent(prompt);
-    break;
-  } catch (error: any) {
-    lastError = error;
-
-    const status = error?.status;
-
-    const retryable =
-      status === 429 ||
-      status === 500 ||
-      status === 502 ||
-      status === 503 ||
-      status === 504;
-
-    if (!retryable || attempt === 3) {
-      throw error;
-    }
-
-    const delay = attempt * 1000;
-
-    console.log(
-      `Gemini request failed with ${status}. ` +
-      `Retrying in ${delay}ms...`
-    );
-
-    await new Promise((resolve) =>
-      setTimeout(resolve, delay)
-    );
-  }
-}
-
-if (!result) {
-  throw lastError ?? new Error("Gemini request failed");
-}
-
-const responseText = result.response.text();
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+        },
+      });
 
     /*
-     * STEP 6:
-     * Clean the response and parse JSON.
+     * --------------------------------------------------
+     * STEP 5: Extract Gemini response
+     * --------------------------------------------------
      */
-    const cleanedResponse = extractJson(responseText);
+    const response =
+      result.response;
 
-    let parsedResponse: unknown;
+    const text =
+      response.text();
 
-    try {
-      parsedResponse = JSON.parse(cleanedResponse);
-    } catch (error) {
-      console.error("Failed to parse Gemini JSON response.");
-      console.error("Gemini response:");
-      console.error(responseText);
-
+    if (!text) {
       throw new Error(
-        "AI returned an invalid JSON response"
+        "Gemini returned an empty response"
       );
     }
 
     /*
-     * STEP 7:
-     * Validate the AI response at runtime.
+     * --------------------------------------------------
+     * STEP 6: Parse JSON
+     * --------------------------------------------------
      */
-    const validatedAnalysis =
-      validateIncidentAnalysis(parsedResponse);
+    const cleanedResponse =
+      cleanJsonResponse(text);
+
+    let parsedAnalysis: Partial<IncidentAnalysis>;
+
+    try {
+      parsedAnalysis =
+        JSON.parse(
+          cleanedResponse
+        );
+    } catch (parseError) {
+      console.error(
+        "Failed to parse Gemini JSON response:"
+      );
+
+      console.error(
+        cleanedResponse
+      );
+
+      throw new Error(
+        "Gemini returned invalid JSON"
+      );
+    }
 
     /*
-     * STEP 8:
-     * Return validated analysis.
+     * --------------------------------------------------
+     * STEP 7: Normalize and validate
+     * --------------------------------------------------
      */
-    return validatedAnalysis;
-  } catch (error) {
-    console.error("AI analysis error:", error);
+    const analysis =
+      normalizeAnalysis(
+        parsedAnalysis
+      );
 
-    throw new Error("Failed to analyze incident");
+    console.log(
+      "AI incident analysis completed"
+    );
+
+    console.log(
+      `Severity: ${analysis.severity}`
+    );
+
+    console.log(
+      `Error Type: ${analysis.errorType}`
+    );
+
+    console.log(
+      `Confidence: ${analysis.confidence}`
+    );
+
+    console.log(
+      `Knowledge Documents Used: ${relevantKnowledge.length}`
+    );
+
+    return analysis;
+  } catch (error) {
+    console.error(
+      "AI analysis error:",
+      error
+    );
+
+    throw new Error(
+      "Failed to analyze incident"
+    );
   }
 };
