@@ -4,6 +4,7 @@ import cors from "cors";
 import authRoutes from "./routes/auth.routes";
 import incidentRoutes from "./routes/incident.routes";
 import aiTestRoutes from "./routes/ai-test.routes";
+import projectRoutes from "./routes/project.routes";
 
 const app = express();
 
@@ -20,5 +21,5 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/incidents", incidentRoutes);
 app.use("/api/ai-test", aiTestRoutes);
-
+app.use("/api/projects", projectRoutes);
 export default app;
