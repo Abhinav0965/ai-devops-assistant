@@ -28,6 +28,8 @@ model Project {
 
   services  Service[]
 
+  githubRepositories GitHubRepository[]
+
   @@index([ownerId])
 }
 
@@ -42,6 +44,24 @@ model Service {
 
   @@index([projectId])
 }
+
+
+model GitHubRepository {
+  id        String   @id @default(cuid())
+
+  owner     String
+  repo      String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([owner, repo, projectId])
+  @@index([projectId])
+}
+
 
 model Incident {
   id        String   @id @default(cuid())
