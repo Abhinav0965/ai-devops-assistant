@@ -21,10 +21,10 @@ export const createIncident = async ({
       log,
 
       severity: analysis.severity,
+      confidence: analysis.confidence,
       errorType: analysis.errorType,
       rootCause: analysis.rootCause,
       solution: analysis.recommendedSolution,
-
       possibleCauses: analysis.possibleCauses,
       prevention: analysis.prevention,
 

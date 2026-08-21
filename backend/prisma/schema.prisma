@@ -53,9 +53,10 @@ model Incident {
   errorType String?
   rootCause String?
   solution  String?
-  
+
   possibleCauses Json?
   prevention     String?
+  confidence     Float?
 
   status    String   @default("ANALYZED")
 
